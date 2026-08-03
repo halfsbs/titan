@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import concurrent.futures
 
-app = FastAPI(title="SUNGATE TITAN API v10 CCcam-PROTOCOL")
+app = FastAPI(title="SUNGATE TITAN API v11 CCcam-PROTOCOL")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 jobs = {}
 
@@ -78,7 +78,7 @@ def GetPaddedString(string, padding):
 
 
 def DoHandshake(sock):
-    """CCcam handshake with detailed logging"""
+    """CCcam handshake"""
     recvblock = CryptographicBlock()
     sendblock = CryptographicBlock()
     log_steps = []
@@ -91,9 +91,8 @@ def DoHandshake(sock):
     log_steps.append({"step": "recv", "seed_hex": random.hex(), "seed_len": len(random), "info": f"Received {len(random)} bytes"})
 
     # 2. XOR with "CCcam"
-    random_before = random.hex()
     random = Xor(random)
-    log_steps.append({"step": "xor", "before": random_before, "after": random.hex(), "info": "XOR with CCcam"})
+    log_steps.append({"step": "xor", "seed_hex": random.hex(), "info": "XOR with CCcam"})
 
     # 3. SHA1 of XOR'd bytes
     sha1 = hashlib.sha1()
@@ -113,9 +112,8 @@ def DoHandshake(sock):
 
     # 6. Encrypt and send sha1hash
     buffer = FillArray(bytearray(20), sha1hash)
-    buffer_before = buffer.hex()
     sendblock.Encrypt(buffer, 20)
-    log_steps.append({"step": "encrypt_hash", "before": buffer_before, "after": buffer.hex(), "info": f"Encrypted hash: {buffer.hex()}"})
+    log_steps.append({"step": "encrypt_hash", "hash_hex": buffer.hex(), "info": f"Encrypted hash: {buffer.hex()}"})
     sent = sock.send(buffer)
     log_steps.append({"step": "send", "sent_bytes": sent, "info": f"Sent {sent} bytes"})
 
@@ -123,6 +121,7 @@ def DoHandshake(sock):
 
 
 def SendMessage(data, length, sock, sendblock):
+    """Encrypt and send data"""
     buffer = FillArray(bytearray(length), data)
     sendblock.Encrypt(buffer, length)
     return sock.send(buffer)
@@ -160,16 +159,16 @@ def check_cccam_line(host, port, user, pwd, orig, timeout=5):
 
         sendblock, recvblock, _ = DoHandshake(sock)
 
-        # Send username (20 bytes padded)
+        # Send username (20 bytes padded) - encrypt via SendMessage
         user_array = GetPaddedString(user, 20)
         SendMessage(user_array, 20, sock, sendblock)
 
-        # Send password (encrypted)
+        # Send password - encrypt ONCE, then send raw (like original gist)
         pwd_array = GetPaddedString(pwd, len(pwd))
         sendblock.Encrypt(pwd_array, len(pwd_array))
-        SendMessage(pwd_array, len(pwd_array), sock, sendblock)
+        sock.send(pwd_array)  # Already encrypted, send raw
 
-        # Send "CCcam" (6 bytes padded)
+        # Send "CCcam" (6 bytes padded) - encrypt via SendMessage
         cccam_array = GetPaddedString("CCcam", 6)
         SendMessage(cccam_array, 6, sock, sendblock)
 
@@ -293,23 +292,23 @@ def check_cccam_debug(host, port, user, pwd, orig, timeout=5):
                 "method": i,
                 "is_open": False,
                 "seed_len": log_entry.get("seed_len", 0),
-                "seed_hex": log_entry.get("seed_hex", log_entry.get("before", "")),
+                "seed_hex": log_entry.get("seed_hex", log_entry.get("hash_hex", "")),
                 "resp_len": log_entry.get("sent_bytes", 0),
                 "info": log_entry.get("info", "")
             })
 
-        # Send username (20 bytes padded)
+        # Send username (20 bytes padded) - encrypt via SendMessage
         user_array = GetPaddedString(user, 20)
         SendMessage(user_array, 20, sock, sendblock)
         details.append({"method": len(hs_logs), "is_open": False, "seed_len": 0, "resp_len": 0, "info": f"Sent user: {user}"})
 
-        # Send password (encrypted)
+        # Send password - encrypt ONCE, then send raw
         pwd_array = GetPaddedString(pwd, len(pwd))
         sendblock.Encrypt(pwd_array, len(pwd_array))
-        SendMessage(pwd_array, len(pwd_array), sock, sendblock)
-        details.append({"method": len(hs_logs)+1, "is_open": False, "seed_len": 0, "resp_len": 0, "info": "Sent encrypted password"})
+        sock.send(pwd_array)
+        details.append({"method": len(hs_logs)+1, "is_open": False, "seed_len": 0, "resp_len": 0, "info": f"Sent encrypted password ({len(pwd)}b)"})
 
-        # Send CCcam
+        # Send CCcam (6 bytes padded) - encrypt via SendMessage
         cccam_array = GetPaddedString("CCcam", 6)
         SendMessage(cccam_array, 6, sock, sendblock)
         details.append({"method": len(hs_logs)+2, "is_open": False, "seed_len": 0, "resp_len": 0, "info": "Sent CCcam ACK request"})
@@ -335,7 +334,7 @@ def check_cccam_debug(host, port, user, pwd, orig, timeout=5):
                 "interpretation": "WORKING" if is_open else "AUTH_FAILED - bad ACK",
                 "details": details,
                 "any_working": is_open,
-                "version": "v10-cccam",
+                "version": "v11-cccam",
                 "info": f"CCcam auth {'OK' if is_open else 'FAILED'}: {repr(response)}"
             }
         else:
@@ -350,7 +349,7 @@ def check_cccam_debug(host, port, user, pwd, orig, timeout=5):
                 "interpretation": "AUTH_FAILED - no response",
                 "details": details,
                 "any_working": False,
-                "version": "v10-cccam",
+                "version": "v11-cccam",
                 "info": "No response after auth"
             }
 
@@ -368,7 +367,7 @@ def check_cccam_debug(host, port, user, pwd, orig, timeout=5):
             "interpretation": f"ERROR: {str(e)[:80]}",
             "details": details,
             "any_working": False,
-            "version": "v10-cccam",
+            "version": "v11-cccam",
             "info": str(e)[:120],
             "traceback": tb
         }
@@ -385,14 +384,14 @@ def check_cccam_debug(host, port, user, pwd, orig, timeout=5):
 def root():
     return {
         "status": "online",
-        "version": "v10-CCcam-PROTOCOL",
-        "service": "SUNGATE TITAN API v10 - Real CCcam Auth",
+        "version": "v11-CCcam-PROTOCOL",
+        "service": "SUNGATE TITAN API v11 - Real CCcam Auth",
         "endpoints": ["/check-cccam-sync", "/debug-single", "/health"]
     }
 
 @app.get("/health")
 def health():
-    return {"ok": True, "version": "v10"}
+    return {"ok": True, "version": "v11"}
 
 @app.post("/check-cccam-sync")
 def check_sync(req: CheckRequest):
