@@ -1,11 +1,11 @@
-import socket, time, uuid, re, hashlib
+import socket, time, uuid, re, hashlib, traceback
 from typing import List
 from fastapi import FastAPI, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import concurrent.futures
 
-app = FastAPI(title="SUNGATE TITAN API v9 CCcam-PROTOCOL")
+app = FastAPI(title="SUNGATE TITAN API v10 CCcam-PROTOCOL")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 jobs = {}
 
@@ -78,38 +78,48 @@ def GetPaddedString(string, padding):
 
 
 def DoHandshake(sock):
-    """CCcam handshake: recv 16b -> xor -> sha1 -> init blocks -> send encrypted sha1"""
+    """CCcam handshake with detailed logging"""
     recvblock = CryptographicBlock()
     sendblock = CryptographicBlock()
+    log_steps = []
 
-    # 1. Receive 16 bytes (use recv instead of recv_into for reliability)
+    # 1. Receive 16 bytes
     data = sock.recv(16)
     if len(data) < 16:
         raise Exception(f"Incomplete seed: got {len(data)} bytes, expected 16")
     random = bytearray(data)
+    log_steps.append({"step": "recv", "seed_hex": random.hex(), "seed_len": len(random), "info": f"Received {len(random)} bytes"})
 
     # 2. XOR with "CCcam"
+    random_before = random.hex()
     random = Xor(random)
+    log_steps.append({"step": "xor", "before": random_before, "after": random.hex(), "info": "XOR with CCcam"})
 
     # 3. SHA1 of XOR'd bytes
     sha1 = hashlib.sha1()
     sha1.update(random)
     sha1digest = bytearray(sha1.digest())
     sha1hash = FillArray(bytearray(20), sha1digest)
+    log_steps.append({"step": "sha1", "sha1_hex": sha1hash.hex(), "info": f"SHA1 hash: {sha1hash.hex()}"})
 
     # 4. Init recvblock with sha1hash, decrypt random
     recvblock.Init(sha1hash, 20)
     recvblock.Decrypt(random, 16)
+    log_steps.append({"step": "recvblock_init", "decrypted_seed_hex": random.hex(), "info": "recvblock init + decrypt"})
 
     # 5. Init sendblock with decrypted random
     sendblock.Init(random, 16)
+    log_steps.append({"step": "sendblock_init", "info": "sendblock init"})
 
-    # 6. Encrypt and send sha1hash (NO extra Decrypt step!)
+    # 6. Encrypt and send sha1hash
     buffer = FillArray(bytearray(20), sha1hash)
+    buffer_before = buffer.hex()
     sendblock.Encrypt(buffer, 20)
-    sock.send(buffer)
+    log_steps.append({"step": "encrypt_hash", "before": buffer_before, "after": buffer.hex(), "info": f"Encrypted hash: {buffer.hex()}"})
+    sent = sock.send(buffer)
+    log_steps.append({"step": "send", "sent_bytes": sent, "info": f"Sent {sent} bytes"})
 
-    return sendblock, recvblock
+    return sendblock, recvblock, log_steps
 
 
 def SendMessage(data, length, sock, sendblock):
@@ -148,7 +158,7 @@ def check_cccam_line(host, port, user, pwd, orig, timeout=5):
         sock.settimeout(timeout)
         sock.connect((host, port))
 
-        sendblock, recvblock = DoHandshake(sock)
+        sendblock, recvblock, _ = DoHandshake(sock)
 
         # Send username (20 bytes padded)
         user_array = GetPaddedString(user, 20)
@@ -274,55 +284,37 @@ def check_cccam_debug(host, port, user, pwd, orig, timeout=5):
         sock.settimeout(timeout)
         sock.connect((host, port))
 
-        # Step 1: Receive 16 bytes
-        data = sock.recv(16)
-        if len(data) < 16:
-            raise Exception(f"Incomplete seed: {len(data)} bytes")
-        random = bytearray(data)
-        details.append({"method": 0, "is_open": False, "seed_len": len(random), "seed_hex": random.hex(), "resp_len": 0, "info": f"recv seed {len(random)}b"})
+        # Do handshake with logging
+        sendblock, recvblock, hs_logs = DoHandshake(sock)
 
-        # Step 2: Xor
-        random = Xor(random)
-        details.append({"method": 0, "is_open": False, "seed_len": len(random), "seed_hex": random.hex(), "resp_len": 0, "info": "XOR with CCcam"})
+        # Convert hs_logs to frontend format
+        for i, log_entry in enumerate(hs_logs):
+            details.append({
+                "method": i,
+                "is_open": False,
+                "seed_len": log_entry.get("seed_len", 0),
+                "seed_hex": log_entry.get("seed_hex", log_entry.get("before", "")),
+                "resp_len": log_entry.get("sent_bytes", 0),
+                "info": log_entry.get("info", "")
+            })
 
-        # Step 3: SHA1
-        sha1 = hashlib.sha1()
-        sha1.update(random)
-        sha1digest = bytearray(sha1.digest())
-        sha1hash = FillArray(bytearray(20), sha1digest)
-        details.append({"method": 0, "is_open": False, "seed_len": 0, "resp_len": 0, "info": f"SHA1: {sha1hash.hex()}"})
-
-        # Step 4: Init blocks
-        recvblock = CryptographicBlock()
-        sendblock = CryptographicBlock()
-        recvblock.Init(sha1hash, 20)
-        recvblock.Decrypt(random, 16)
-        sendblock.Init(random, 16)
-        details.append({"method": 0, "is_open": False, "seed_len": 0, "resp_len": 0, "info": "Blocks initialized"})
-
-        # Step 5: Send SHA1 hash (encrypted)
-        buffer = FillArray(bytearray(20), sha1hash)
-        sendblock.Encrypt(buffer, 20)
-        sock.send(buffer)
-        details.append({"method": 1, "is_open": False, "seed_len": 0, "resp_len": 0, "info": f"Sent SHA1 hash {buffer.hex()[:40]}..."})
-
-        # Step 6: Send user
+        # Send username (20 bytes padded)
         user_array = GetPaddedString(user, 20)
         SendMessage(user_array, 20, sock, sendblock)
-        details.append({"method": 1, "is_open": False, "seed_len": 0, "resp_len": 0, "info": f"Sent user: {user}"})
+        details.append({"method": len(hs_logs), "is_open": False, "seed_len": 0, "resp_len": 0, "info": f"Sent user: {user}"})
 
-        # Step 7: Send password (encrypted)
+        # Send password (encrypted)
         pwd_array = GetPaddedString(pwd, len(pwd))
         sendblock.Encrypt(pwd_array, len(pwd_array))
         SendMessage(pwd_array, len(pwd_array), sock, sendblock)
-        details.append({"method": 2, "is_open": False, "seed_len": 0, "resp_len": 0, "info": "Sent encrypted password"})
+        details.append({"method": len(hs_logs)+1, "is_open": False, "seed_len": 0, "resp_len": 0, "info": "Sent encrypted password"})
 
-        # Step 8: Send CCcam
+        # Send CCcam
         cccam_array = GetPaddedString("CCcam", 6)
         SendMessage(cccam_array, 6, sock, sendblock)
-        details.append({"method": 2, "is_open": False, "seed_len": 0, "resp_len": 0, "info": "Sent CCcam ACK request"})
+        details.append({"method": len(hs_logs)+2, "is_open": False, "seed_len": 0, "resp_len": 0, "info": "Sent CCcam ACK request"})
 
-        # Step 9: Receive response
+        # Receive response
         received = bytearray(20)
         sock.settimeout(3.0)
         recv_count = sock.recv_into(received, 20)
@@ -331,8 +323,8 @@ def check_cccam_debug(host, port, user, pwd, orig, timeout=5):
         if recv_count > 0:
             recvblock.Decrypt(received, 20)
             response = received.decode("ascii", errors="replace").rstrip('\x00').strip()
-            details.append({"method": 3, "is_open": response == "CCcam", "seed_len": 0, "resp_len": recv_count, "resp_data": response, "info": f"Response: {repr(response)}"})
             is_open = (response == "CCcam")
+            details.append({"method": len(hs_logs)+3, "is_open": is_open, "seed_len": 0, "resp_len": recv_count, "resp_data": response, "info": f"Response: {repr(response)}"})
             return {
                 "line": orig,
                 "is_open_after_login": is_open,
@@ -343,11 +335,11 @@ def check_cccam_debug(host, port, user, pwd, orig, timeout=5):
                 "interpretation": "WORKING" if is_open else "AUTH_FAILED - bad ACK",
                 "details": details,
                 "any_working": is_open,
-                "version": "v9-cccam",
+                "version": "v10-cccam",
                 "info": f"CCcam auth {'OK' if is_open else 'FAILED'}: {repr(response)}"
             }
         else:
-            details.append({"method": 3, "is_open": False, "seed_len": 0, "resp_len": 0, "info": "No response"})
+            details.append({"method": len(hs_logs)+3, "is_open": False, "seed_len": 0, "resp_len": 0, "info": "No response"})
             return {
                 "line": orig,
                 "is_open_after_login": False,
@@ -358,13 +350,14 @@ def check_cccam_debug(host, port, user, pwd, orig, timeout=5):
                 "interpretation": "AUTH_FAILED - no response",
                 "details": details,
                 "any_working": False,
-                "version": "v9-cccam",
+                "version": "v10-cccam",
                 "info": "No response after auth"
             }
 
     except Exception as e:
         elapsed = int((time.time() - start) * 1000)
-        details.append({"method": 3, "is_open": False, "seed_len": 0, "resp_len": 0, "info": f"Error: {str(e)[:80]}"})
+        tb = traceback.format_exc()
+        details.append({"method": 99, "is_open": False, "seed_len": 0, "resp_len": 0, "info": f"Error: {str(e)[:80]}", "traceback": tb})
         return {
             "line": orig,
             "is_open_after_login": False,
@@ -375,8 +368,9 @@ def check_cccam_debug(host, port, user, pwd, orig, timeout=5):
             "interpretation": f"ERROR: {str(e)[:80]}",
             "details": details,
             "any_working": False,
-            "version": "v9-cccam",
-            "info": str(e)[:120]
+            "version": "v10-cccam",
+            "info": str(e)[:120],
+            "traceback": tb
         }
     finally:
         if sock:
@@ -391,14 +385,14 @@ def check_cccam_debug(host, port, user, pwd, orig, timeout=5):
 def root():
     return {
         "status": "online",
-        "version": "v9-CCcam-PROTOCOL",
-        "service": "SUNGATE TITAN API v9 - Real CCcam Auth",
+        "version": "v10-CCcam-PROTOCOL",
+        "service": "SUNGATE TITAN API v10 - Real CCcam Auth",
         "endpoints": ["/check-cccam-sync", "/debug-single", "/health"]
     }
 
 @app.get("/health")
 def health():
-    return {"ok": True, "version": "v9"}
+    return {"ok": True, "version": "v10"}
 
 @app.post("/check-cccam-sync")
 def check_sync(req: CheckRequest):
