@@ -1,5 +1,5 @@
 // Frontend için bunu en üste ekle
-const API_URL = localStorage.getItem('SUNGATE_API_URL') || 'https://SUNGATE-API-LINKINI-BURAYA-YAZ.onrender.com';
+const API_URL = localStorage.getItem('SUNGATE_API_URL') || 'hthttps://titan-djmk.onrender.com';
 
 // Kullanım örneği:
 fetch(`${API_URL}/check-cccam`, {
