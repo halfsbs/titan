@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import concurrent.futures
 
-app = FastAPI(title="SUNGATE TITAN API v13 CCcam-PROTOCOL")
+app = FastAPI(title="SUNGATE TITAN API v14 CCcam-PROTOCOL")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 jobs = {}
 
@@ -78,7 +78,7 @@ def GetPaddedString(string, padding):
 
 
 def DoHandshake(sock):
-    """CCcam handshake - EXACTLY like original gist"""
+    """CCcam handshake - EXACTLY like original working gist"""
     recvblock = CryptographicBlock()
     sendblock = CryptographicBlock()
     log_steps = []
@@ -110,10 +110,9 @@ def DoHandshake(sock):
     sendblock.Init(random, 16)
     log_steps.append({"step": "sendblock_init", "info": "sendblock init with decrypted random"})
 
-    # 6. CRITICAL: Decrypt sha1hash with sendblock (like original gist!)
-    # This updates sendblock state before encrypting the hash
+    # 6. Decrypt sha1hash with sendblock (CRITICAL for state update)
     sendblock.Decrypt(sha1hash, 20)
-    log_steps.append({"step": "sendblock_decrypt", "decrypted_hash_hex": sha1hash.hex(), "info": "sendblock.Decrypt(sha1hash, 20) - CRITICAL STEP"})
+    log_steps.append({"step": "sendblock_decrypt", "decrypted_hash_hex": sha1hash.hex(), "info": "sendblock.Decrypt(sha1hash, 20) - CRITICAL"})
 
     # 7. Encrypt and send sha1hash
     buffer = FillArray(bytearray(20), sha1hash)
@@ -155,6 +154,7 @@ def parse_c_line(line: str):
 
 # ===================== CCcam Check =====================
 def check_cccam_line(host, port, user, pwd, orig, timeout=5):
+    """CCcam auth - password is encrypted but NOT sent (state update only)"""
     sock = None
     start = time.time()
     try:
@@ -164,16 +164,16 @@ def check_cccam_line(host, port, user, pwd, orig, timeout=5):
 
         sendblock, recvblock, _ = DoHandshake(sock)
 
-        # Send username (20 bytes padded)
+        # Send username (20 bytes padded) - encrypt + send
         user_array = GetPaddedString(user, 20)
         SendMessage(user_array, 20, sock, sendblock)
 
-        # Send password - encrypt ONCE with sendblock, then send raw
+        # Encrypt password BUT DO NOT SEND IT - only updates sendblock state
         pwd_array = GetPaddedString(pwd, len(pwd))
         sendblock.Encrypt(pwd_array, len(pwd_array))
-        sock.send(pwd_array)
+        # NO sock.send(pwd_array) - this is the key insight!
 
-        # Send "CCcam" (6 bytes padded)
+        # Send "CCcam" (6 bytes padded) - encrypt + send
         cccam_array = GetPaddedString("CCcam", 6)
         SendMessage(cccam_array, 6, sock, sendblock)
 
@@ -306,11 +306,10 @@ def check_cccam_debug(host, port, user, pwd, orig, timeout=5):
         SendMessage(user_array, 20, sock, sendblock)
         details.append({"method": len(hs_logs), "is_open": False, "seed_len": 0, "resp_len": 0, "info": f"Sent user: {user}"})
 
-        # Send password - encrypt ONCE, then send raw
+        # Encrypt password BUT DO NOT SEND - state update only
         pwd_array = GetPaddedString(pwd, len(pwd))
         sendblock.Encrypt(pwd_array, len(pwd_array))
-        sock.send(pwd_array)
-        details.append({"method": len(hs_logs)+1, "is_open": False, "seed_len": 0, "resp_len": 0, "info": f"Sent encrypted password ({len(pwd)}b)"})
+        details.append({"method": len(hs_logs)+1, "is_open": False, "seed_len": 0, "resp_len": 0, "info": f"Encrypted password ({len(pwd)}b) - NOT SENT, state update only"})
 
         # Send "CCcam" (6 bytes padded)
         cccam_array = GetPaddedString("CCcam", 6)
@@ -338,7 +337,7 @@ def check_cccam_debug(host, port, user, pwd, orig, timeout=5):
                 "interpretation": "WORKING" if is_open else "AUTH_FAILED - bad ACK",
                 "details": details,
                 "any_working": is_open,
-                "version": "v13-cccam",
+                "version": "v14-cccam",
                 "info": f"CCcam auth {'OK' if is_open else 'FAILED'}: {repr(response)}"
             }
         else:
@@ -353,7 +352,7 @@ def check_cccam_debug(host, port, user, pwd, orig, timeout=5):
                 "interpretation": "AUTH_FAILED - no response",
                 "details": details,
                 "any_working": False,
-                "version": "v13-cccam",
+                "version": "v14-cccam",
                 "info": "No response after auth"
             }
 
@@ -371,7 +370,7 @@ def check_cccam_debug(host, port, user, pwd, orig, timeout=5):
             "interpretation": f"ERROR: {str(e)[:80]}",
             "details": details,
             "any_working": False,
-            "version": "v13-cccam",
+            "version": "v14-cccam",
             "info": str(e)[:120],
             "traceback": tb
         }
@@ -388,14 +387,14 @@ def check_cccam_debug(host, port, user, pwd, orig, timeout=5):
 def root():
     return {
         "status": "online",
-        "version": "v13-CCcam-PROTOCOL",
-        "service": "SUNGATE TITAN API v13 - Real CCcam Auth (with Decrypt step)",
+        "version": "v14-CCcam-PROTOCOL",
+        "service": "SUNGATE TITAN API v14 - Real CCcam Auth (Password State Update Only)",
         "endpoints": ["/check-cccam-sync", "/debug-single", "/health"]
     }
 
 @app.get("/health")
 def health():
-    return {"ok": True, "version": "v13"}
+    return {"ok": True, "version": "v14"}
 
 @app.post("/check-cccam-sync")
 def check_sync(req: CheckRequest):
