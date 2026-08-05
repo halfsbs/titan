@@ -309,7 +309,7 @@ def check_cccam_debug(host, port, user, pwd, orig, timeout=5):
         # Encrypt password BUT DO NOT SEND - state update only
         pwd_array = GetPaddedString(pwd, len(pwd))
         sendblock.Encrypt(pwd_array, len(pwd_array))
-        details.append({"method": len(hs_logs)-1, "is_open": False, "seed_len": 0, "resp_len": 0, "info": f"Encrypted password ({len(pwd)}b) - NOT SENT, state update only"})
+        details.append({"method": len(hs_logs)+1, "is_open": False, "seed_len": 0, "resp_len": 0, "info": f"Encrypted password ({len(pwd)}b) - NOT SENT, state update only"})
 
         # Send "CCcam" (6 bytes padded)
         cccam_array = GetPaddedString("CCcam", 6)
